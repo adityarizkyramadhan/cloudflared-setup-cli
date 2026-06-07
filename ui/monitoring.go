@@ -17,6 +17,11 @@ type monitorMsg struct {
 	text  string
 	isErr bool
 }
+type logStreamerReadyMsg struct {
+	streamer  *monitoring.LogStreamer
+	firstLine string
+	err       error
+}
 
 type monitoringSubScreen int
 
@@ -69,7 +74,7 @@ func (m monitoringModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "1":
 			m.subScreen = monitorLogs
 			m.logLines = nil
-			return m, startLogStream("my-tunnel")
+			return m, startLogStreamFromConfig
 		case "2":
 			return m, checkStatus
 		case "3":
@@ -79,6 +84,16 @@ func (m monitoringModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "0":
 			return m, GoBack()
 		}
+
+	case logStreamerReadyMsg:
+		if msg.err != nil {
+			return m, func() tea.Msg { return monitorMsg{text: msg.err.Error(), isErr: true} }
+		}
+		m.streamer = msg.streamer
+		m.logLines = append(m.logLines, msg.firstLine)
+		m.viewport.SetContent(strings.Join(m.logLines, "\n"))
+		m.viewport.GotoBottom()
+		return m, readNextLine(m.streamer)
 
 	case logLineMsg:
 		m.logLines = append(m.logLines, string(msg))
@@ -133,14 +148,23 @@ func startLogStream(tunnelName string) tea.Cmd {
 		}
 		line, err := streamer.NextLine()
 		if err == io.EOF {
+			streamer.Stop()
 			return logDoneMsg{}
 		}
 		if err != nil {
+			streamer.Stop()
 			return monitorMsg{text: err.Error(), isErr: true}
 		}
-		_ = streamer
-		return logLineMsg(line)
+		return logStreamerReadyMsg{streamer: streamer, firstLine: line}
 	}
+}
+
+func startLogStreamFromConfig() tea.Msg {
+	name, err := readActiveTunnelName()
+	if err != nil || name == "" {
+		return monitorMsg{text: "Tidak ada tunnel di config — buat tunnel terlebih dahulu", isErr: true}
+	}
+	return startLogStream(name)()
 }
 
 func readNextLine(streamer *monitoring.LogStreamer) tea.Cmd {
