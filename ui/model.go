@@ -75,7 +75,19 @@ func (m RootModel) View() string {
 }
 
 // screenFor returns a fresh model for the given screen.
-// Sub-models are wired in Task 15; stubs return main menu until then.
 func screenFor(s Screen) tea.Model {
-	return newMainMenuModel() // replaced in Task 15
+	switch s {
+	case ScreenAuth:
+		return newAuthModel()
+	case ScreenCredentials:
+		return newCredentialsModel()
+	case ScreenMonitoring:
+		return newMonitoringModel()
+	case ScreenOrchestration:
+		return newOrchestrationModel()
+	case ScreenMaintenance:
+		return newMaintenanceModel()
+	default:
+		return newMainMenuModel()
+	}
 }
