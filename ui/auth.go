@@ -5,6 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/adityarizkyramadhan/cloudflared-setup-cli/internal/cloudflared"
+	"github.com/adityarizkyramadhan/cloudflared-setup-cli/internal/platform"
 )
 
 type authMsg struct{ text string; isErr bool }
@@ -78,15 +79,14 @@ func checkInstalled() tea.Msg {
 }
 
 func downloadCloudflared() tea.Msg {
-	home, err := cloudflared.ConfigDir()
-	_ = home
+	dir, err := platform.InstallDir()
 	if err != nil {
 		return authMsg{text: err.Error(), isErr: true}
 	}
-	if err := cloudflared.Install("/usr/local/bin"); err != nil {
+	if err := cloudflared.Install(dir); err != nil {
 		return authMsg{text: err.Error(), isErr: true}
 	}
-	return authMsg{text: "cloudflared berhasil diinstall"}
+	return authMsg{text: fmt.Sprintf("cloudflared berhasil diinstall ke %s\n(pastikan folder ini ada di PATH agar perintah cloudflared bisa dipanggil)", dir)}
 }
 
 func loginCloudflare() tea.Msg {

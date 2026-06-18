@@ -2,6 +2,9 @@
 
 ATM-style interactive TUI for managing Cloudflare Tunnels.
 
+Runs natively on **Windows, Linux, and macOS** — the CLI auto-detects the host
+OS and adapts the install location and service manager automatically.
+
 ## Install
 
 ```bash
@@ -20,10 +23,10 @@ Navigate with number keys. Press `0` to go back. Press `Ctrl+C` to quit.
 
 ## Menus
 
-1. **Autentikasi & Setup** — install cloudflared, login to Cloudflare
+1. **Autentikasi & Setup** — install cloudflared (auto-detects install dir per OS), login to Cloudflare
 2. **Manajemen Kredensial** — create/delete tunnels, configure ingress
 3. **Observability & Monitoring** — live logs, status, health check
-4. **Orkestrasi** — generate systemd, Docker Compose, Windows Service, or Kubernetes manifests
+4. **Orkestrasi** — install as a native service auto-detected per OS (Windows Service / systemd, with UAC auto-elevation on Windows), or generate Docker Compose / Kubernetes manifests
 5. **Pemeliharaan** — update, cleanup, backup, reset
 
 ## Release

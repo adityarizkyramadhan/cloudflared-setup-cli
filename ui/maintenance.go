@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/adityarizkyramadhan/cloudflared-setup-cli/internal/cloudflared"
 	"github.com/adityarizkyramadhan/cloudflared-setup-cli/internal/maintenance"
 )
 
@@ -145,11 +146,10 @@ func runCleanup() tea.Msg {
 }
 
 func doBackup(path string) tea.Msg {
-	home, err := maintenance.GetHomeDir()
+	from, err := cloudflared.ConfigDir()
 	if err != nil {
 		return maintMsg{text: err.Error(), isErr: true}
 	}
-	from := home + "/.cloudflared"
 	if err := maintenance.CopyDir(from, path); err != nil {
 		return maintMsg{text: err.Error(), isErr: true}
 	}
