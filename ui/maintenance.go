@@ -10,8 +10,9 @@ import (
 )
 
 type maintMsg struct {
-	text  string
-	isErr bool
+	text        string
+	isErr       bool
+	updateReady bool
 }
 
 type maintInputState int
@@ -23,10 +24,11 @@ const (
 )
 
 type maintenanceModel struct {
-	status     string
-	isErr      bool
-	inputState maintInputState
-	input      string
+	status      string
+	isErr       bool
+	inputState  maintInputState
+	input       string
+	updateReady bool
 }
 
 func newMaintenanceModel() maintenanceModel { return maintenanceModel{} }
@@ -57,6 +59,11 @@ func (m maintenanceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.String() {
 		case "1":
+			if m.updateReady {
+				m.updateReady = false
+				m.status = "Mengupdate cloudflared..."
+				return m, doUpdate
+			}
 			m.status = "Memeriksa update..."
 			return m, checkUpdate
 		case "2":
@@ -75,6 +82,7 @@ func (m maintenanceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case maintMsg:
 		m.status = msg.text
 		m.isErr = msg.isErr
+		m.updateReady = msg.updateReady
 		m.inputState = maintIdle
 		m.input = ""
 	}
@@ -138,7 +146,18 @@ func checkUpdate() tea.Msg {
 	if current == latest {
 		return maintMsg{text: fmt.Sprintf("Sudah versi terbaru: %s", current)}
 	}
-	return maintMsg{text: fmt.Sprintf("Update tersedia: %s → %s\nTekan [1] lagi untuk update", current, latest)}
+	return maintMsg{text: fmt.Sprintf("Update tersedia: %s → %s\nTekan [1] lagi untuk update", current, latest), updateReady: true}
+}
+
+func doUpdate() tea.Msg {
+	if err := maintenance.UpdateBinary(); err != nil {
+		return maintMsg{text: "Update gagal: " + err.Error(), isErr: true}
+	}
+	v := maintenance.CurrentVersion()
+	if v == "" {
+		return maintMsg{text: "cloudflared berhasil diupdate"}
+	}
+	return maintMsg{text: "cloudflared berhasil diupdate → " + v}
 }
 
 func runCleanup() tea.Msg {
