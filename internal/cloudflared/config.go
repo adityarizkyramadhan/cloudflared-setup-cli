@@ -63,6 +63,27 @@ func WriteConfig(cfg *Config) error {
 	return os.WriteFile(filepath.Join(dir, "config.yml"), data, 0600)
 }
 
+// ActiveTunnel returns the tunnel name recorded in config.yml, or "" if none
+// is set. A missing config file is not an error.
+func ActiveTunnel() (string, error) {
+	cfg, err := ReadConfig()
+	if err != nil {
+		return "", err
+	}
+	return cfg.Tunnel, nil
+}
+
+// SetTunnel records name as the active tunnel in config.yml, preserving any
+// existing ingress rules.
+func SetTunnel(name string) error {
+	cfg, err := ReadConfig()
+	if err != nil {
+		return err
+	}
+	cfg.Tunnel = name
+	return WriteConfig(cfg)
+}
+
 func AddIngressRule(hostname, service string) error {
 	cfg, err := ReadConfig()
 	if err != nil {

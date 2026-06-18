@@ -23,14 +23,18 @@ const (
 	credWaitingService
 	credWaitingDeleteName
 	credWaitingExportPath
+	credWaitingIngressTunnel
+	credWaitingDNSHostname
+	credWaitingDNSTunnel
 )
 
 type credentialsModel struct {
-	status      string
-	isErr       bool
-	inputState  credInputState
-	input       string
-	pendingName string
+	status          string
+	isErr           bool
+	inputState      credInputState
+	input           string
+	pendingHostname string
+	pendingService  string
 }
 
 func newCredentialsModel() credentialsModel { return credentialsModel{} }
@@ -51,6 +55,8 @@ func (m credentialsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc", "ctrl+c":
 				m.inputState = credIdle
 				m.input = ""
+				m.pendingHostname = ""
+				m.pendingService = ""
 				m.status = "Dibatalkan"
 			default:
 				if len(msg.String()) == 1 {
@@ -76,6 +82,10 @@ func (m credentialsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Hostname (contoh: app.domain.com): "
 		case "5":
 			return m, exportConfig
+		case "6":
+			m.inputState = credWaitingDNSHostname
+			m.input = ""
+			m.status = "Hostname untuk DNS route (contoh: app.domain.com): "
 		case "0":
 			return m, GoBack()
 		}
@@ -99,7 +109,10 @@ func (m credentialsModel) handleInput() (credentialsModel, tea.Cmd) {
 			if err != nil {
 				return credMsg{text: err.Error(), isErr: true}
 			}
-			return credMsg{text: fmt.Sprintf("Tunnel %q dibuat — ID: %s", name, id)}
+			if err := cloudflared.SetTunnel(name); err != nil {
+				return credMsg{text: fmt.Sprintf("Tunnel %q dibuat (ID: %s), tapi gagal diset aktif: %v", name, id, err)}
+			}
+			return credMsg{text: fmt.Sprintf("Tunnel %q dibuat & diset aktif — ID: %s", name, id)}
 		}
 	case credWaitingDeleteName:
 		name := strings.TrimSpace(m.input)
@@ -112,22 +125,54 @@ func (m credentialsModel) handleInput() (credentialsModel, tea.Cmd) {
 			return credMsg{text: fmt.Sprintf("Tunnel %q dihapus", name)}
 		}
 	case credWaitingHostname:
-		m.pendingName = strings.TrimSpace(m.input)
+		m.pendingHostname = strings.TrimSpace(m.input)
 		m.inputState = credWaitingService
 		m.input = ""
 		m.status = "Service (contoh: http://localhost:8080): "
+		return m, nil
 	case credWaitingService:
-		hostname := m.pendingName
-		service := strings.TrimSpace(m.input)
+		m.pendingService = strings.TrimSpace(m.input)
+		m.input = ""
+		tunnel, _ := cloudflared.ActiveTunnel()
+		if tunnel != "" {
+			host, svc := m.pendingHostname, m.pendingService
+			m.inputState = credIdle
+			m.pendingHostname, m.pendingService = "", ""
+			return m, func() tea.Msg { return addIngressAndRoute(host, svc, tunnel) }
+		}
+		m.inputState = credWaitingIngressTunnel
+		m.status = "Nama tunnel untuk DNS route (Enter kosong = lewati DNS): "
+		return m, nil
+	case credWaitingIngressTunnel:
+		tunnel := strings.TrimSpace(m.input)
+		host, svc := m.pendingHostname, m.pendingService
 		m.inputState = credIdle
 		m.input = ""
-		m.pendingName = ""
-		return m, func() tea.Msg {
-			if err := cloudflared.AddIngressRule(hostname, service); err != nil {
-				return credMsg{text: err.Error(), isErr: true}
-			}
-			return credMsg{text: fmt.Sprintf("Ingress %s → %s ditambahkan", hostname, service)}
+		m.pendingHostname, m.pendingService = "", ""
+		return m, func() tea.Msg { return addIngressAndRoute(host, svc, tunnel) }
+	case credWaitingDNSHostname:
+		m.pendingHostname = strings.TrimSpace(m.input)
+		m.input = ""
+		tunnel, _ := cloudflared.ActiveTunnel()
+		if tunnel != "" {
+			host := m.pendingHostname
+			m.inputState = credIdle
+			m.pendingHostname = ""
+			return m, func() tea.Msg { return routeDNSOnly(tunnel, host) }
 		}
+		m.inputState = credWaitingDNSTunnel
+		m.status = "Nama tunnel: "
+		return m, nil
+	case credWaitingDNSTunnel:
+		tunnel := strings.TrimSpace(m.input)
+		host := m.pendingHostname
+		m.inputState = credIdle
+		m.input = ""
+		m.pendingHostname = ""
+		if tunnel == "" {
+			return m, func() tea.Msg { return credMsg{text: "Dibatalkan — nama tunnel kosong", isErr: true} }
+		}
+		return m, func() tea.Msg { return routeDNSOnly(tunnel, host) }
 	}
 	return m, nil
 }
@@ -139,7 +184,8 @@ func (m credentialsModel) View() string {
 			"[2] Buat tunnel baru\n" +
 			"[3] Hapus tunnel\n" +
 			"[4] Konfigurasi ingress rules\n" +
-			"[5] Export / import config\n\n" +
+			"[5] Export / import config\n" +
+			"[6] Route DNS (CNAME ke tunnel)\n\n" +
 			"[0] Kembali",
 	)
 	var bottom string
@@ -165,7 +211,7 @@ func listTunnels() tea.Msg {
 	}
 	var sb strings.Builder
 	for _, t := range tunnels {
-		sb.WriteString(fmt.Sprintf("• %s (%s)\n", t.Name, t.ID))
+		fmt.Fprintf(&sb, "• %s (%s)\n", t.Name, t.ID)
 	}
 	return credMsg{text: strings.TrimSpace(sb.String())}
 }
@@ -179,4 +225,28 @@ func exportConfig() tea.Msg {
 		return credMsg{text: err.Error(), isErr: true}
 	}
 	return credMsg{text: "Config di-export ke ./cloudflared-backup"}
+}
+
+// addIngressAndRoute adds the ingress rule, then creates the DNS route for the
+// hostname. A RouteDNS failure is non-fatal: the ingress rule is kept and the
+// DNS error is surfaced as a warning.
+func addIngressAndRoute(hostname, service, tunnel string) tea.Msg {
+	if err := cloudflared.AddIngressRule(hostname, service); err != nil {
+		return credMsg{text: err.Error(), isErr: true}
+	}
+	base := fmt.Sprintf("Ingress %s → %s ditambahkan", hostname, service)
+	if tunnel == "" {
+		return credMsg{text: base + "\n⚠ DNS route dilewati (tunnel tidak diketahui)"}
+	}
+	if err := cloudflared.RouteDNS(tunnel, hostname); err != nil {
+		return credMsg{text: base + fmt.Sprintf("\n⚠ DNS route gagal: %v", err)}
+	}
+	return credMsg{text: base + fmt.Sprintf("\nDNS route dibuat: %s → %s", hostname, tunnel)}
+}
+
+func routeDNSOnly(tunnel, hostname string) tea.Msg {
+	if err := cloudflared.RouteDNS(tunnel, hostname); err != nil {
+		return credMsg{text: err.Error(), isErr: true}
+	}
+	return credMsg{text: fmt.Sprintf("DNS route dibuat: %s → %s", hostname, tunnel)}
 }
