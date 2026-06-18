@@ -46,6 +46,9 @@ func DownloadURL() (string, error) {
 }
 
 func Install(destDir string) error {
+	if runtime.GOOS == "darwin" {
+		return fmt.Errorf("auto-install belum didukung di macOS (rilis berupa .tgz) — install manual via brew/installer")
+	}
 	url, err := DownloadURL()
 	if err != nil {
 		return err

@@ -1,108 +1,68 @@
 package ui
 
 import (
-	"fmt"
-
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/adityarizkyramadhan/cloudflared-setup-cli/internal/cloudflared"
 	"github.com/adityarizkyramadhan/cloudflared-setup-cli/internal/platform"
 )
 
-type authMsg struct{ text string; isErr bool }
-
-type authModel struct {
-	status  string
-	isErr   bool
-	loading bool
-}
-
-func newAuthModel() authModel { return authModel{} }
-
-func (m authModel) Init() tea.Cmd { return nil }
-
-func (m authModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		if m.loading {
-			return m, nil
+func (c *Console) authMenu() {
+	for {
+		c.println("")
+		c.println("=== AUTENTIKASI & SETUP ===")
+		c.println("[1] Cek instalasi cloudflared")
+		c.println("[2] Install / download cloudflared")
+		c.println("[3] Login ke Cloudflare")
+		c.println("[4] Verifikasi koneksi")
+		c.println("[0] Kembali")
+		choice := c.readChoice()
+		if c.eof {
+			return
 		}
-		switch msg.String() {
+		switch choice {
+		case "":
+			continue
 		case "1":
-			return m, checkInstalled
+			if cloudflared.IsInstalled() {
+				v, _ := cloudflared.GetVersion()
+				c.ok("cloudflared terinstall: " + v)
+			} else {
+				c.fail("cloudflared tidak ditemukan di PATH")
+			}
 		case "2":
-			m.loading = true
-			m.status = "Mengunduh cloudflared..."
-			return m, downloadCloudflared
+			dir, err := platform.InstallDir()
+			if err != nil {
+				c.fail(err.Error())
+				break
+			}
+			c.info("Mengunduh cloudflared ke " + dir + " ...")
+			if err := cloudflared.Install(dir); err != nil {
+				c.fail(err.Error())
+				break
+			}
+			c.ok("cloudflared terinstall ke " + dir)
+			c.info("Pastikan folder ini ada di PATH agar perintah 'cloudflared' bisa dipanggil.")
 		case "3":
-			m.loading = true
-			m.status = "Membuka browser untuk login Cloudflare..."
-			return m, loginCloudflare
+			c.info("Membuka browser untuk login Cloudflare...")
+			if err := cloudflared.Login(); err != nil {
+				c.fail(err.Error())
+				break
+			}
+			c.ok("Login berhasil")
 		case "4":
-			return m, verifyConnection
+			ok, err := cloudflared.VerifyConnection()
+			if err != nil {
+				c.fail(err.Error())
+				break
+			}
+			if !ok {
+				c.fail("cert.pem tidak ditemukan — jalankan Login terlebih dahulu")
+			} else {
+				c.ok("Koneksi terverifikasi — cert.pem ditemukan")
+			}
 		case "0":
-			return m, GoBack()
-		}
-	case authMsg:
-		m.loading = false
-		m.status = msg.text
-		m.isErr = msg.isErr
-	}
-	return m, nil
-}
-
-func (m authModel) View() string {
-	title := TitleStyle.Render("AUTENTIKASI & SETUP")
-	menu := MenuStyle.Render(
-		"[1] Cek instalasi cloudflared\n" +
-			"[2] Install / download cloudflared\n" +
-			"[3] Login ke Cloudflare\n" +
-			"[4] Verifikasi koneksi\n\n" +
-			"[0] Kembali",
-	)
-	var statusLine string
-	if m.status != "" {
-		if m.isErr {
-			statusLine = "\n" + ErrorStyle.Render("✗ "+m.status)
-		} else {
-			statusLine = "\n" + SuccessStyle.Render("✓ "+m.status)
+			return
+		default:
+			c.fail("Pilihan tidak valid")
 		}
 	}
-	return title + "\n" + menu + statusLine
-}
-
-func checkInstalled() tea.Msg {
-	if cloudflared.IsInstalled() {
-		v, _ := cloudflared.GetVersion()
-		return authMsg{text: fmt.Sprintf("cloudflared terinstall: %s", v)}
-	}
-	return authMsg{text: "cloudflared tidak ditemukan di PATH", isErr: true}
-}
-
-func downloadCloudflared() tea.Msg {
-	dir, err := platform.InstallDir()
-	if err != nil {
-		return authMsg{text: err.Error(), isErr: true}
-	}
-	if err := cloudflared.Install(dir); err != nil {
-		return authMsg{text: err.Error(), isErr: true}
-	}
-	return authMsg{text: fmt.Sprintf("cloudflared berhasil diinstall ke %s\n(pastikan folder ini ada di PATH agar perintah cloudflared bisa dipanggil)", dir)}
-}
-
-func loginCloudflare() tea.Msg {
-	if err := cloudflared.Login(); err != nil {
-		return authMsg{text: err.Error(), isErr: true}
-	}
-	return authMsg{text: "Login berhasil"}
-}
-
-func verifyConnection() tea.Msg {
-	ok, err := cloudflared.VerifyConnection()
-	if err != nil {
-		return authMsg{text: err.Error(), isErr: true}
-	}
-	if !ok {
-		return authMsg{text: "cert.pem tidak ditemukan — jalankan Login terlebih dahulu", isErr: true}
-	}
-	return authMsg{text: "Koneksi terverifikasi — cert.pem ditemukan"}
 }

@@ -5,204 +5,119 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/adityarizkyramadhan/cloudflared-setup-cli/internal/orchestration"
 	"github.com/adityarizkyramadhan/cloudflared-setup-cli/internal/platform"
 )
 
-type orchMsg struct {
-	text  string
-	isErr bool
-}
-
-type orchInputState int
-
-const (
-	orchIdle orchInputState = iota
-	orchWaitingTunnelName
-	orchWaitingToken
-)
-
-type orchAction int
-
-const (
-	orchActionNative orchAction = iota
-	orchActionDocker
-	orchActionKubernetes
-)
-
-type orchestrationModel struct {
-	status        string
-	isErr         bool
-	inputState    orchInputState
-	input         string
-	pendingName   string
-	pendingAction orchAction
-}
-
-func newOrchestrationModel() orchestrationModel { return orchestrationModel{} }
-
-func (m orchestrationModel) Init() tea.Cmd { return nil }
-
-func (m orchestrationModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		if m.inputState != orchIdle {
-			switch msg.String() {
-			case "enter":
-				return m.handleInput()
-			case "backspace":
-				if len(m.input) > 0 {
-					m.input = m.input[:len(m.input)-1]
-				}
-			case "esc":
-				m.inputState = orchIdle
-				m.input = ""
-				m.status = "Dibatalkan"
-			default:
-				if len(msg.String()) == 1 {
-					m.input += msg.String()
-				}
-			}
-			return m, nil
+func (c *Console) orchestrationMenu() {
+	for {
+		c.println("")
+		c.println("=== ORKESTRASI ===")
+		c.printf("[1] Install service native (auto-detect: %s)\n", platform.ServiceManager())
+		c.println("[2] Docker / Docker Compose")
+		c.println("[3] Kubernetes manifest")
+		c.println("[0] Kembali")
+		choice := c.readChoice()
+		if c.eof {
+			return
 		}
-		switch msg.String() {
+		switch choice {
+		case "":
+			continue
 		case "1":
-			m.pendingAction = orchActionNative
-			m.inputState = orchWaitingTunnelName
-			m.input = ""
-			m.status = fmt.Sprintf("Nama tunnel untuk service native (%s): ", platform.ServiceManager())
+			c.installNativeService()
 		case "2":
-			m.pendingAction = orchActionDocker
-			m.inputState = orchWaitingTunnelName
-			m.input = ""
-			m.status = "Nama tunnel untuk Docker Compose: "
+			c.generateDockerCompose()
 		case "3":
-			m.pendingAction = orchActionKubernetes
-			m.inputState = orchWaitingTunnelName
-			m.input = ""
-			m.status = "Nama tunnel untuk Kubernetes: "
+			c.generateKubernetes()
 		case "0":
-			return m, GoBack()
+			return
+		default:
+			c.fail("Pilihan tidak valid")
 		}
-	case orchMsg:
-		m.status = msg.text
-		m.isErr = msg.isErr
-		m.inputState = orchIdle
-		m.input = ""
 	}
-	return m, nil
 }
 
-func (m orchestrationModel) handleInput() (orchestrationModel, tea.Cmd) {
-	val := strings.TrimSpace(m.input)
-	switch m.inputState {
-	case orchWaitingTunnelName:
-		m.pendingName = val
-		m.input = ""
-		if m.pendingAction == orchActionDocker {
-			m.inputState = orchWaitingToken
-			m.status = "Tunnel token (dari Cloudflare dashboard): "
-			return m, nil
-		}
-		m.inputState = orchIdle
-		name := m.pendingName
-		action := m.pendingAction
-		return m, func() tea.Msg { return executeOrch(action, name, "") }
-	case orchWaitingToken:
-		token := val
-		name := m.pendingName
-		m.inputState = orchIdle
-		m.input = ""
-		return m, func() tea.Msg { return executeOrch(orchActionDocker, name, token) }
+func (c *Console) installNativeService() {
+	name := c.prompt("Nama tunnel: ")
+	if name == "" {
+		c.fail("nama kosong")
+		return
 	}
-	m.inputState = orchIdle
-	return m, nil
-}
-
-func executeOrch(action orchAction, tunnelName, token string) tea.Msg {
-	switch action {
-	case orchActionNative:
-		return installNativeService(tunnelName)
-	case orchActionDocker:
-		content, err := orchestration.DockerCompose(tunnelName, token)
-		if err != nil {
-			return orchMsg{text: err.Error(), isErr: true}
-		}
-		if err := os.WriteFile("docker-compose.yml", []byte(content), 0644); err != nil {
-			return orchMsg{text: err.Error(), isErr: true}
-		}
-		return orchMsg{text: "docker-compose.yml disimpan — jalankan: docker compose up -d"}
-	case orchActionKubernetes:
-		content, err := orchestration.KubernetesManifest(tunnelName)
-		if err != nil {
-			return orchMsg{text: err.Error(), isErr: true}
-		}
-		path := fmt.Sprintf("cloudflared-%s-deployment.yaml", tunnelName)
-		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-			return orchMsg{text: err.Error(), isErr: true}
-		}
-		return orchMsg{text: fmt.Sprintf("Manifest disimpan: %s\nJalankan: kubectl apply -f %s", path, path)}
-	}
-	return orchMsg{text: "Unknown action", isErr: true}
-}
-
-// installNativeService auto-detects the host service manager and installs the
-// tunnel as a native service, elevating to admin on Windows when needed.
-func installNativeService(tunnelName string) tea.Msg {
 	switch platform.ServiceManager() {
 	case "windows":
 		if !platform.IsAdmin() {
+			c.info("Butuh hak admin — meminta elevasi (UAC)...")
 			if err := platform.RelaunchElevated(); err != nil {
-				return orchMsg{text: "Butuh hak admin, tapi elevasi dibatalkan: " + err.Error(), isErr: true}
+				c.fail("elevasi dibatalkan: " + err.Error())
+				return
 			}
-			// Elevated copy takes over; this instance exits.
-			return tea.QuitMsg{}
+			c.info("Instance admin dijalankan di jendela baru — lanjutkan di sana.")
+			os.Exit(0)
 		}
 		cfPath, err := exec.LookPath("cloudflared")
 		if err != nil {
 			dir, derr := platform.InstallDir()
 			if derr != nil {
-				return orchMsg{text: "cloudflared tidak ditemukan di PATH — install dulu lewat menu Autentikasi", isErr: true}
+				c.fail("cloudflared tidak ditemukan di PATH — install dulu lewat menu Autentikasi")
+				return
 			}
 			cfPath = filepath.Join(dir, "cloudflared.exe")
 		}
-		if err := orchestration.InstallWindowsService(tunnelName, cfPath); err != nil {
-			return orchMsg{text: err.Error(), isErr: true}
+		if err := orchestration.InstallWindowsService(name, cfPath); err != nil {
+			c.fail(err.Error())
+			return
 		}
-		return orchMsg{text: fmt.Sprintf("Windows Service cloudflared-%s terpasang & berjalan", tunnelName)}
+		c.ok(fmt.Sprintf("Windows Service cloudflared-%s terpasang & berjalan", name))
 	case "systemd":
-		path, err := orchestration.InstallSystemd(tunnelName)
+		path, err := orchestration.InstallSystemd(name)
 		if err != nil {
-			return orchMsg{text: "Gagal pasang systemd (perlu root? jalankan ulang dengan sudo): " + err.Error(), isErr: true}
+			c.fail("gagal pasang systemd (perlu root? jalankan ulang dengan sudo): " + err.Error())
+			return
 		}
-		return orchMsg{text: fmt.Sprintf("systemd service terpasang & aktif: %s", path)}
+		c.ok("systemd service terpasang & aktif: " + path)
 	case "launchd":
-		return orchMsg{text: "macOS (launchd) belum didukung — gunakan Docker [2]", isErr: true}
+		c.fail("macOS (launchd) belum didukung — gunakan Docker [2]")
 	default:
-		return orchMsg{text: "OS ini tidak didukung untuk service native — gunakan Docker [2]", isErr: true}
+		c.fail("OS ini tidak didukung untuk service native — gunakan Docker [2]")
 	}
 }
 
-func (m orchestrationModel) View() string {
-	title := TitleStyle.Render("ORKESTRASI")
-	menu := MenuStyle.Render(
-		fmt.Sprintf("[1] Install service native (auto-detect: %s)\n", platform.ServiceManager()) +
-			"[2] Docker / Docker Compose\n" +
-			"[3] Kubernetes manifest\n\n" +
-			"[0] Kembali",
-	)
-	var bottom string
-	if m.inputState != orchIdle {
-		bottom = "\n" + DimStyle.Render(m.status) + m.input + "█"
-	} else if m.status != "" {
-		if m.isErr {
-			bottom = "\n" + ErrorStyle.Render("✗ "+m.status)
-		} else {
-			bottom = "\n" + SuccessStyle.Render(m.status)
-		}
+func (c *Console) generateDockerCompose() {
+	name := c.prompt("Nama tunnel: ")
+	if name == "" {
+		c.fail("nama kosong")
+		return
 	}
-	return title + "\n" + menu + bottom
+	token := c.prompt("Tunnel token (dari Cloudflare dashboard): ")
+	content, err := orchestration.DockerCompose(name, token)
+	if err != nil {
+		c.fail(err.Error())
+		return
+	}
+	if err := os.WriteFile("docker-compose.yml", []byte(content), 0644); err != nil {
+		c.fail(err.Error())
+		return
+	}
+	c.ok("docker-compose.yml disimpan — jalankan: docker compose up -d")
+}
+
+func (c *Console) generateKubernetes() {
+	name := c.prompt("Nama tunnel: ")
+	if name == "" {
+		c.fail("nama kosong")
+		return
+	}
+	content, err := orchestration.KubernetesManifest(name)
+	if err != nil {
+		c.fail(err.Error())
+		return
+	}
+	path := fmt.Sprintf("cloudflared-%s-deployment.yaml", name)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		c.fail(err.Error())
+		return
+	}
+	c.ok(fmt.Sprintf("Manifest disimpan: %s — jalankan: kubectl apply -f %s", path, path))
 }

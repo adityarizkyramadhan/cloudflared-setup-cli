@@ -4,178 +4,134 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/adityarizkyramadhan/cloudflared-setup-cli/internal/cloudflared"
 	"github.com/adityarizkyramadhan/cloudflared-setup-cli/internal/maintenance"
 )
 
-type maintMsg struct {
-	text        string
-	isErr       bool
-	updateReady bool
-}
-
-type maintInputState int
-
-const (
-	maintIdle maintInputState = iota
-	maintWaitingBackupPath
-	maintWaitingResetConfirm
-)
-
-type maintenanceModel struct {
-	status      string
-	isErr       bool
-	inputState  maintInputState
-	input       string
-	updateReady bool
-}
-
-func newMaintenanceModel() maintenanceModel { return maintenanceModel{} }
-
-func (m maintenanceModel) Init() tea.Cmd { return nil }
-
-func (m maintenanceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		if m.inputState != maintIdle {
-			switch msg.String() {
-			case "enter":
-				return m.handleInput()
-			case "backspace":
-				if len(m.input) > 0 {
-					m.input = m.input[:len(m.input)-1]
-				}
-			case "esc":
-				m.inputState = maintIdle
-				m.input = ""
-				m.status = "Dibatalkan"
-			default:
-				if len(msg.String()) == 1 {
-					m.input += msg.String()
-				}
-			}
-			return m, nil
+func (c *Console) maintenanceMenu() {
+	for {
+		c.println("")
+		c.println("=== PEMELIHARAAN ===")
+		c.println("[1] Update cloudflared")
+		c.println("[2] Cleanup credential orphan")
+		c.println("[3] Backup config")
+		c.println("[4] Reset / Uninstall semua")
+		c.println("[0] Kembali")
+		choice := c.readChoice()
+		if c.eof {
+			return
 		}
-		switch msg.String() {
+		switch choice {
+		case "":
+			continue
 		case "1":
-			if m.updateReady {
-				m.updateReady = false
-				m.status = "Mengupdate cloudflared..."
-				return m, doUpdate
-			}
-			m.status = "Memeriksa update..."
-			return m, checkUpdate
+			c.updateCloudflared()
 		case "2":
-			return m, runCleanup
+			c.cleanupOrphans()
 		case "3":
-			m.inputState = maintWaitingBackupPath
-			m.input = ""
-			m.status = "Path backup (Enter = ./cloudflared-backup): "
+			c.backupConfig()
 		case "4":
-			m.inputState = maintWaitingResetConfirm
-			m.input = ""
-			m.status = "KONFIRMASI RESET — ketik 'yes' untuk melanjutkan: "
+			c.resetAll()
 		case "0":
-			return m, GoBack()
-		}
-	case maintMsg:
-		m.status = msg.text
-		m.isErr = msg.isErr
-		m.updateReady = msg.updateReady
-		m.inputState = maintIdle
-		m.input = ""
-	}
-	return m, nil
-}
-
-func (m maintenanceModel) handleInput() (maintenanceModel, tea.Cmd) {
-	val := strings.TrimSpace(m.input)
-	switch m.inputState {
-	case maintWaitingBackupPath:
-		if val == "" {
-			val = "./cloudflared-backup"
-		}
-		path := val
-		m.inputState = maintIdle
-		m.input = ""
-		return m, func() tea.Msg { return doBackup(path) }
-	case maintWaitingResetConfirm:
-		m.inputState = maintIdle
-		m.input = ""
-		if val != "yes" {
-			return m, func() tea.Msg { return maintMsg{text: "Reset dibatalkan"} }
-		}
-		return m, doReset
-	}
-	m.inputState = maintIdle
-	return m, nil
-}
-
-func (m maintenanceModel) View() string {
-	title := TitleStyle.Render("PEMELIHARAAN")
-	menu := MenuStyle.Render(
-		"[1] Update cloudflared\n" +
-			"[2] Cleanup (hapus yang tidak terpakai)\n" +
-			"[3] Backup & Restore config\n" +
-			"[4] Reset / Uninstall semua\n\n" +
-			"[0] Kembali",
-	)
-	var bottom string
-	if m.inputState != maintIdle {
-		bottom = "\n" + DimStyle.Render(m.status) + m.input + "█"
-	} else if m.status != "" {
-		if m.isErr {
-			bottom = "\n" + ErrorStyle.Render("✗ "+m.status)
-		} else {
-			bottom = "\n" + SuccessStyle.Render(m.status)
+			return
+		default:
+			c.fail("Pilihan tidak valid")
 		}
 	}
-	return title + "\n" + menu + bottom
 }
 
-func checkUpdate() tea.Msg {
+func (c *Console) updateCloudflared() {
 	latest, err := maintenance.LatestVersion()
 	if err != nil {
-		return maintMsg{text: err.Error(), isErr: true}
+		c.fail(err.Error())
+		return
 	}
 	current := maintenance.CurrentVersion()
 	if current == "" {
-		return maintMsg{text: fmt.Sprintf("Versi terbaru: %s (cloudflared belum terinstall)", latest), isErr: true}
+		c.fail(fmt.Sprintf("cloudflared belum terinstall (versi terbaru: %s)", latest))
+		return
 	}
 	if current == latest {
-		return maintMsg{text: fmt.Sprintf("Sudah versi terbaru: %s", current)}
+		c.ok("Sudah versi terbaru: " + current)
+		return
 	}
-	return maintMsg{text: fmt.Sprintf("Update tersedia: %s → %s\nTekan [1] lagi untuk update", current, latest), updateReady: true}
-}
-
-func doUpdate() tea.Msg {
+	c.info(fmt.Sprintf("Update tersedia: %s → %s", current, latest))
+	if !c.confirm("Update sekarang?") {
+		c.info("Dibatalkan")
+		return
+	}
+	c.info("Mengupdate cloudflared...")
 	if err := maintenance.UpdateBinary(); err != nil {
-		return maintMsg{text: "Update gagal: " + err.Error(), isErr: true}
+		c.fail("update gagal: " + err.Error())
+		return
 	}
-	v := maintenance.CurrentVersion()
-	if v == "" {
-		return maintMsg{text: "cloudflared berhasil diupdate"}
+	if v := maintenance.CurrentVersion(); v != "" {
+		c.ok("cloudflared berhasil diupdate → " + v)
+	} else {
+		c.ok("cloudflared berhasil diupdate")
 	}
-	return maintMsg{text: "cloudflared berhasil diupdate → " + v}
 }
 
-func runCleanup() tea.Msg {
-	return maintMsg{text: "Cleanup: gunakan menu Kredensial > Lihat tunnel untuk identifikasi tunnel tidak terpakai"}
+func (c *Console) cleanupOrphans() {
+	dir, err := cloudflared.ConfigDir()
+	if err != nil {
+		c.fail(err.Error())
+		return
+	}
+	tunnels, err := cloudflared.ListTunnels()
+	if err != nil {
+		c.fail("gagal mengambil daftar tunnel: " + err.Error())
+		return
+	}
+	inUse := make(map[string]bool, len(tunnels)*2)
+	for _, t := range tunnels {
+		inUse[t.Name] = true
+		inUse[t.ID] = true // credential files are named by tunnel UUID
+	}
+	orphans, err := maintenance.OrphanedCredentials(dir, inUse)
+	if err != nil {
+		c.fail(err.Error())
+		return
+	}
+	if len(orphans) == 0 {
+		c.ok("Tidak ada credential orphan")
+		return
+	}
+	c.info("Credential orphan ditemukan:")
+	for _, o := range orphans {
+		c.println("  • " + o)
+	}
+	if !c.confirm(fmt.Sprintf("Hapus %d file ini?", len(orphans))) {
+		c.info("Dibatalkan")
+		return
+	}
+	if errs := maintenance.DeleteFiles(orphans); len(errs) > 0 {
+		c.fail(fmt.Sprintf("%d file gagal dihapus", len(errs)))
+		return
+	}
+	c.ok(fmt.Sprintf("%d credential orphan dihapus", len(orphans)))
 }
 
-func doBackup(path string) tea.Msg {
+func (c *Console) backupConfig() {
+	path := c.promptDefault("Path backup (Enter = ./cloudflared-backup): ", "./cloudflared-backup")
 	from, err := cloudflared.ConfigDir()
 	if err != nil {
-		return maintMsg{text: err.Error(), isErr: true}
+		c.fail(err.Error())
+		return
 	}
 	if err := maintenance.CopyDir(from, path); err != nil {
-		return maintMsg{text: err.Error(), isErr: true}
+		c.fail(err.Error())
+		return
 	}
-	return maintMsg{text: fmt.Sprintf("Backup selesai → %s", path)}
+	c.ok("Backup selesai → " + path)
 }
 
-func doReset() tea.Msg {
+func (c *Console) resetAll() {
+	c.warn("Ini akan uninstall cloudflared dan menghapus folder config (~/.cloudflared)")
+	if c.prompt("Ketik 'yes' untuk konfirmasi: ") != "yes" {
+		c.info("Reset dibatalkan")
+		return
+	}
 	var errs []string
 	if err := maintenance.UninstallCloudflared(); err != nil {
 		errs = append(errs, "binary: "+err.Error())
@@ -184,7 +140,8 @@ func doReset() tea.Msg {
 		errs = append(errs, "config: "+err.Error())
 	}
 	if len(errs) > 0 {
-		return maintMsg{text: "Reset sebagian gagal: " + strings.Join(errs, "; "), isErr: true}
+		c.fail("Reset sebagian gagal: " + strings.Join(errs, "; "))
+		return
 	}
-	return maintMsg{text: "Reset selesai — cloudflared dan config dihapus"}
+	c.ok("Reset selesai — cloudflared dan config dihapus")
 }

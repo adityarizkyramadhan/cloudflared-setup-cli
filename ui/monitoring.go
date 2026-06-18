@@ -2,212 +2,136 @@ package ui
 
 import (
 	"fmt"
-	"io"
-	"strings"
+	"os"
+	"os/signal"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"github.com/adityarizkyramadhan/cloudflared-setup-cli/internal/api"
 	"github.com/adityarizkyramadhan/cloudflared-setup-cli/internal/cloudflared"
 	"github.com/adityarizkyramadhan/cloudflared-setup-cli/internal/monitoring"
 )
 
-type logLineMsg string
-type logDoneMsg struct{}
-type monitorMsg struct {
-	text  string
-	isErr bool
-}
-type logStreamerReadyMsg struct {
-	streamer  *monitoring.LogStreamer
-	firstLine string
-	err       error
-}
-
-type monitoringSubScreen int
-
-const (
-	monitorMain monitoringSubScreen = iota
-	monitorLogs
-)
-
-type monitoringModel struct {
-	subScreen monitoringSubScreen
-	viewport  viewport.Model
-	logLines  []string
-	streamer  *monitoring.LogStreamer
-	status    string
-	isErr     bool
-	ready     bool
-}
-
-func newMonitoringModel() monitoringModel {
-	vp := viewport.New(80, 20)
-	return monitoringModel{viewport: vp}
-}
-
-func (m monitoringModel) Init() tea.Cmd { return nil }
-
-func (m monitoringModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - 6
-		m.ready = true
-
-	case tea.KeyMsg:
-		if m.subScreen == monitorLogs {
-			switch msg.String() {
-			case "q", "0":
-				if m.streamer != nil {
-					m.streamer.Stop()
-					m.streamer = nil
-				}
-				m.subScreen = monitorMain
-				m.logLines = nil
-				return m, nil
-			}
-			var cmd tea.Cmd
-			m.viewport, cmd = m.viewport.Update(msg)
-			return m, cmd
+func (c *Console) monitoringMenu() {
+	for {
+		c.println("")
+		c.println("=== OBSERVABILITY & MONITORING ===")
+		c.println("[1] Live logs (Ctrl+C untuk berhenti)")
+		c.println("[2] Status tunnel")
+		c.println("[3] Metrics via Cloudflare API")
+		c.println("[4] Health check endpoint")
+		c.println("[0] Kembali")
+		choice := c.readChoice()
+		if c.eof {
+			return
 		}
-		switch msg.String() {
+		switch choice {
+		case "":
+			continue
 		case "1":
-			m.subScreen = monitorLogs
-			m.logLines = nil
-			return m, startLogStreamFromConfig
+			c.liveLogs()
 		case "2":
-			return m, checkStatus
+			c.tunnelStatus()
 		case "3":
-			return m, fetchMetrics
+			c.apiMetrics()
 		case "4":
-			return m, runHealthCheck
+			c.healthCheck()
 		case "0":
-			return m, GoBack()
+			return
+		default:
+			c.fail("Pilihan tidak valid")
 		}
-
-	case logStreamerReadyMsg:
-		if msg.err != nil {
-			return m, func() tea.Msg { return monitorMsg{text: msg.err.Error(), isErr: true} }
-		}
-		m.streamer = msg.streamer
-		m.logLines = append(m.logLines, msg.firstLine)
-		m.viewport.SetContent(strings.Join(m.logLines, "\n"))
-		m.viewport.GotoBottom()
-		return m, readNextLine(m.streamer)
-
-	case logLineMsg:
-		m.logLines = append(m.logLines, string(msg))
-		m.viewport.SetContent(strings.Join(m.logLines, "\n"))
-		m.viewport.GotoBottom()
-		return m, readNextLine(m.streamer)
-
-	case logDoneMsg:
-		m.logLines = append(m.logLines, "[stream ended]")
-		m.viewport.SetContent(strings.Join(m.logLines, "\n"))
-
-	case monitorMsg:
-		m.status = msg.text
-		m.isErr = msg.isErr
-	}
-
-	var cmd tea.Cmd
-	m.viewport, cmd = m.viewport.Update(msg)
-	return m, cmd
-}
-
-func (m monitoringModel) View() string {
-	if m.subScreen == monitorLogs {
-		header := TitleStyle.Render("LIVE LOGS") + DimStyle.Render("  [q] berhenti")
-		return header + "\n" + m.viewport.View()
-	}
-
-	title := TitleStyle.Render("OBSERVABILITY & MONITORING")
-	menu := MenuStyle.Render(
-		"[1] Live logs\n" +
-			"[2] Status tunnel\n" +
-			"[3] Metrics (Cloudflare API)\n" +
-			"[4] Health check endpoint\n\n" +
-			"[0] Kembali",
-	)
-	var bottom string
-	if m.status != "" {
-		if m.isErr {
-			bottom = "\n" + ErrorStyle.Render("✗ "+m.status)
-		} else {
-			bottom = "\n" + SuccessStyle.Render(m.status)
-		}
-	}
-	return title + "\n" + menu + bottom
-}
-
-func startLogStream(tunnelName string) tea.Cmd {
-	return func() tea.Msg {
-		streamer, err := monitoring.NewLogStreamer(tunnelName)
-		if err != nil {
-			return monitorMsg{text: err.Error(), isErr: true}
-		}
-		line, err := streamer.NextLine()
-		if err == io.EOF {
-			streamer.Stop()
-			return logDoneMsg{}
-		}
-		if err != nil {
-			streamer.Stop()
-			return monitorMsg{text: err.Error(), isErr: true}
-		}
-		return logStreamerReadyMsg{streamer: streamer, firstLine: line}
 	}
 }
 
-func startLogStreamFromConfig() tea.Msg {
-	name, err := readActiveTunnelName()
+func (c *Console) liveLogs() {
+	name, err := cloudflared.ActiveTunnel()
 	if err != nil || name == "" {
-		return monitorMsg{text: "Tidak ada tunnel di config — buat tunnel terlebih dahulu", isErr: true}
+		c.fail("Tidak ada tunnel aktif di config — buat tunnel terlebih dahulu")
+		return
 	}
-	return startLogStream(name)()
-}
-
-func readNextLine(streamer *monitoring.LogStreamer) tea.Cmd {
-	if streamer == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		line, err := streamer.NextLine()
-		if err == io.EOF {
-			return logDoneMsg{}
-		}
-		if err != nil {
-			return monitorMsg{text: err.Error(), isErr: true}
-		}
-		return logLineMsg(line)
-	}
-}
-
-func checkStatus() tea.Msg {
-	cfg, err := readActiveTunnelName()
-	if err != nil || cfg == "" {
-		return monitorMsg{text: "Tidak ada tunnel aktif di config", isErr: true}
-	}
-	s, err := monitoring.GetStatus(cfg)
+	streamer, err := monitoring.NewLogStreamer(name)
 	if err != nil {
-		return monitorMsg{text: err.Error(), isErr: true}
+		c.fail(err.Error())
+		return
 	}
-	return monitorMsg{text: fmt.Sprintf("Tunnel %q: %s", s.Name, s.Status)}
+	c.info(fmt.Sprintf("Streaming logs untuk %q — tekan Ctrl+C untuk berhenti", name))
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	defer signal.Stop(sig)
+
+	lines := make(chan string, 16)
+	done := make(chan struct{})
+	go func() {
+		for {
+			line, err := streamer.NextLine()
+			if err != nil {
+				close(done)
+				return
+			}
+			lines <- line
+		}
+	}()
+
+	for {
+		select {
+		case <-sig:
+			streamer.Stop()
+			c.info("[dihentikan]")
+			return
+		case <-done:
+			c.info("[stream berakhir]")
+			return
+		case line := <-lines:
+			c.println(line)
+		}
+	}
 }
 
-func fetchMetrics() tea.Msg {
-	return monitorMsg{text: "Metrics memerlukan CF_API_TOKEN dan ACCOUNT_ID — set di config"}
-}
-
-func runHealthCheck() tea.Msg {
-	result := monitoring.CheckHealth("http://localhost:8080")
-	return monitorMsg{text: monitoring.FormatHealth(result)}
-}
-
-func readActiveTunnelName() (string, error) {
-	cfg, err := cloudflared.ReadConfig()
+func (c *Console) tunnelStatus() {
+	name, err := cloudflared.ActiveTunnel()
+	if err != nil || name == "" {
+		c.fail("Tidak ada tunnel aktif di config")
+		return
+	}
+	s, err := monitoring.GetStatus(name)
 	if err != nil {
-		return "", err
+		c.fail(err.Error())
+		return
 	}
-	return cfg.Tunnel, nil
+	c.ok(fmt.Sprintf("Tunnel %q: %s", s.Name, s.Status))
+}
+
+func (c *Console) apiMetrics() {
+	token := c.prompt("Cloudflare API token: ")
+	if token == "" {
+		c.fail("token kosong")
+		return
+	}
+	account := c.prompt("Account ID: ")
+	if account == "" {
+		c.fail("account ID kosong")
+		return
+	}
+	client := api.New(token, account)
+	if err := client.ValidateToken(); err != nil {
+		c.fail("token tidak valid: " + err.Error())
+		return
+	}
+	tunnels, err := client.ListTunnels()
+	if err != nil {
+		c.fail(err.Error())
+		return
+	}
+	if len(tunnels) == 0 {
+		c.info("Tidak ada tunnel di account ini")
+		return
+	}
+	for _, t := range tunnels {
+		c.printf("• %s (%s) — %s\n", t.Name, t.ID, t.Status)
+	}
+}
+
+func (c *Console) healthCheck() {
+	ep := c.promptDefault("Endpoint (Enter = http://localhost:8080): ", "http://localhost:8080")
+	c.println(monitoring.FormatHealth(monitoring.CheckHealth(ep)))
 }
