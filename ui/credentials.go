@@ -119,7 +119,7 @@ func (m credentialsModel) handleInput() (credentialsModel, tea.Cmd) {
 		m.inputState = credIdle
 		m.input = ""
 		return m, func() tea.Msg {
-			if err := cloudflared.DeleteTunnel(name); err != nil {
+			if err := cloudflared.DeleteTunnelWithCleanup(name); err != nil {
 				return credMsg{text: err.Error(), isErr: true}
 			}
 			return credMsg{text: fmt.Sprintf("Tunnel %q dihapus", name)}

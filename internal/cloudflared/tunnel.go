@@ -64,6 +64,50 @@ func DeleteTunnel(name string) error {
 	return nil
 }
 
+// CleanupConnections disconnects stale connections for a tunnel via
+// `cloudflared tunnel cleanup <name>`, freeing it for deletion.
+func CleanupConnections(name string) error {
+	out, err := exec.Command("cloudflared", "tunnel", "cleanup", name).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("tunnel cleanup: %w — %s", err, string(out))
+	}
+	return nil
+}
+
+// isActiveConnectionsErr reports whether a delete failure is the "tunnel has
+// active connections" case (Cloudflare error code 1022).
+func isActiveConnectionsErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "active connection") || strings.Contains(s, "1022")
+}
+
+// DeleteTunnelWithCleanup deletes a tunnel. If the tunnel reports active
+// connections, it disconnects stale connections and retries once. A tunnel
+// that is still actively running (e.g. via a service) returns a clear error
+// telling the user to stop it first.
+func DeleteTunnelWithCleanup(name string) error {
+	err := DeleteTunnel(name)
+	if err == nil {
+		return nil
+	}
+	if !isActiveConnectionsErr(err) {
+		return err
+	}
+	if cerr := CleanupConnections(name); cerr != nil {
+		return fmt.Errorf("%w; cleanup koneksi juga gagal: %v", err, cerr)
+	}
+	if err2 := DeleteTunnel(name); err2 != nil {
+		if isActiveConnectionsErr(err2) {
+			return fmt.Errorf("tunnel %q masih punya koneksi aktif — stop service/proses cloudflared yang menjalankannya dulu, lalu hapus lagi", name)
+		}
+		return err2
+	}
+	return nil
+}
+
 func RunTunnel(name string, w io.Writer) (*exec.Cmd, error) {
 	cmd := exec.Command("cloudflared", "tunnel", "run", name)
 	cmd.Stdout = w
